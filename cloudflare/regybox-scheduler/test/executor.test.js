@@ -5,6 +5,7 @@ import { executePlan, executionMode, readActivity, readLastRun } from "../src/ex
 import { buildFailureFingerprint, errorPayload } from "../src/failures.js";
 import { handleScheduled } from "../src/index.js";
 import {
+  CancellationClosedError,
   ClassIsOverbookedError,
   RegyboxLoginError,
   RegyboxTimeoutError,
@@ -12,8 +13,8 @@ import {
 import { BookrBookingError, BookrLoginError } from "../src/bookr.js";
 
 const workerEnv = {
-  PHPSESSID: "session",
-  REGYBOX_USER: "user",
+  REGIBOX_EMAIL: "member@example.test",
+  REGIBOX_PASSWORD: "test-password",
 };
 
 function makeKv(existing = new Map()) {
@@ -72,7 +73,7 @@ test("execution mode keeps GitHub dispatch as the backward-compatible preference
   );
   assert.throws(
     () => executionMode({ GITHUB_TOKEN: "token" }),
-    /GITHUB_OWNER, GITHUB_REPO, PHPSESSID, REGYBOX_USER/,
+    /GITHUB_OWNER, GITHUB_REPO, REGIBOX_EMAIL, REGIBOX_PASSWORD/,
   );
 });
 
@@ -698,4 +699,49 @@ test("failure payloads and fingerprints mirror the action notification contract"
     buildFailureFingerprint({ operation: "unenroll", error: new ClassIsOverbookedError() }),
     "failure:unenroll:class_overbooked:Class and waitlist are full",
   );
+});
+
+test("a cancellation past the cutoff stops further cancel attempts and reports once", async () => {
+  const kv = makeKv(
+    new Map([["closed", JSON.stringify({ state: "enrolled", classDate: "2026-07-12", classTime: "06:30", classType: "WOD" })]]),
+  );
+  const failures = [];
+  await executePlan({
+    env: workerEnv,
+    kv,
+    dispatches: [dispatch({ operation: "unenroll", cacheKey: "closed" })],
+    createClient: fakeClient,
+    runOperationImpl: async () => {
+      throw new CancellationClosedError({ cancelDeadline: "Sat 11 Jul, 22:30", cutoffHours: 8 });
+    },
+    onFailure: async (failure) => failures.push(failure),
+  });
+  const state = JSON.parse(await kv.get("closed"));
+  assert.equal(state.state, "cancel_closed");
+  assert.equal(state.classType, "WOD");
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0].payload.errorCode, "cancellation_closed");
+  assert.match(failures[0].payload.userMessage, /until 8 hours before it starts \(Sat 11 Jul, 22:30\)/);
+});
+
+test("the worker passes credentials, KV and version to the Regybox client", async () => {
+  const kv = makeKv();
+  let options;
+  await executePlan({
+    env: { ...workerEnv, CF_VERSION_METADATA: { id: "version-1" }, CANCEL_CUTOFF_HOURS: "6" },
+    kv,
+    dispatches: [dispatch()],
+    createClient: (received) => {
+      options = received;
+      return fakeClient();
+    },
+    runOperationImpl: async () => ({ status: "noop", classType: "WOD" }),
+    onResult: async () => {},
+  });
+  assert.equal(options.email, "member@example.test");
+  assert.equal(options.password, "test-password");
+  assert.equal(options.kv, kv);
+  assert.equal(options.versionId, "version-1");
+  assert.equal(options.cancelCutoffHours, 6);
+  assert.equal(options.bookingWindowHours, 48);
 });

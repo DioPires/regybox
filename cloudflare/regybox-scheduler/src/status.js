@@ -1,7 +1,7 @@
 import { defaultLookaheadHours, expandCalendarEvents, resolveClassRules } from "./calendar.js";
-import { executionMode, readActivity, readLastRun } from "./executor.js";
+import { executionMode, readActivity, readLastRun, regyboxClientOptions } from "./executor.js";
 import { emailConfigured } from "./notify.js";
-import { RegyboxLoginError, createRegyboxClient } from "./regybox.js";
+import { RegyboxLoginError, createRegyboxClient, sampleClasses, zonedDate } from "./regybox.js";
 import { incidentConstants, readIncident } from "./incidents.js";
 import { readRun, readRuns, runConstants } from "./runs.js";
 import { bookingPlatform, platformLabel } from "./platform.js";
@@ -114,15 +114,14 @@ function setupChecks(env, platform = "regybox") {
       );
     }
   } else {
-    if (configured(env.PHPSESSID) && configured(env.REGYBOX_USER)) {
-      checks.push(check("ok", "Regybox cookies are set"));
+    if (configured(env.REGIBOX_EMAIL) && configured(env.REGIBOX_PASSWORD)) {
+      checks.push(check("ok", "Regybox email and password are set"));
     } else {
       checks.push(
         check(
           "bad",
-          "Regybox cookies are missing",
-          "Add PHPSESSID and REGYBOX_USER under Settings → Variables and Secrets. " +
-            "Copy both values from regybox.pt using your browser's developer tools.",
+          "Regybox email or password is missing",
+          "Add REGIBOX_EMAIL and REGIBOX_PASSWORD as secrets (type Secret, not Text) under Settings → Variables and Secrets.",
         ),
       );
     }
@@ -259,32 +258,46 @@ async function calendarCheck(env, { fetchImpl, nowMs }) {
   );
 }
 
-async function regyboxCheck(env, { createClient, nowMs }) {
-  if (!configured(env.PHPSESSID) || !configured(env.REGYBOX_USER)) {
+async function regyboxCheck(env, { createClient, nowMs, kv }) {
+  if (!configured(env.REGIBOX_EMAIL) || !configured(env.REGIBOX_PASSWORD)) {
     return null;
   }
+  let html;
+  const timezone = env.TIMEZONE || "Europe/Lisbon";
+  const today = zonedDate(nowMs, timezone);
   try {
-    const client = createClient({
-      phpsessid: env.PHPSESSID,
-      regyboxUser: env.REGYBOX_USER,
-      timezone: env.TIMEZONE || "Europe/Lisbon",
-      retryTotal: 1,
-    });
-    await client.fetchClassesHtml(nowMs);
-    return check("ok", "Regybox accepts your login");
+    const client = createClient({ ...regyboxClientOptions(env, kv), retryTotal: 1 });
+    html = await client.fetchClassesHtml(today);
   } catch (error) {
     if (error instanceof RegyboxLoginError || error?.name === "RegyboxLoginError") {
+      if (error.reason === "rejected" || error.reason === "rejected_recently") {
+        return check(
+          "bad",
+          "Regybox rejected your email or password",
+          "Check REGIBOX_EMAIL and REGIBOX_PASSWORD under Settings → Variables and Secrets. " +
+            "After a rejection the bot pauses sign-in until you change a secret (or 12 hours pass), so it cannot lock your account.",
+        );
+      }
       return check(
         "bad",
-        "Regybox rejected your login — the saved cookie has expired",
-        "Sign in at regybox.pt again, copy the new PHPSESSID value, and update it " +
-          "under Settings → Variables and Secrets.",
+        "Regybox sign-in failed",
+        "Regybox did not complete the sign-in. Refresh this page in a minute; if it keeps failing, open the latest run for details.",
       );
     }
     return check(
       "warn",
       "Regybox could not be reached right now",
       "This is usually temporary. Refresh this page in a minute.",
+    );
+  }
+  try {
+    const { total } = sampleClasses(html, { date: today, timezone, now: nowMs });
+    return check("ok", `Regybox accepts your login (${total} class${total === 1 ? "" : "es"} listed today)`);
+  } catch {
+    return check(
+      "warn",
+      "Signed in to Regybox, but today's class list looks different than expected",
+      "Bookings may fail until the bot is updated for Regybox's new layout.",
     );
   }
 }
@@ -549,7 +562,7 @@ export async function buildStatusModel({
         ])
       : platform === "regybox"
         ? await Promise.all([
-            regyboxCheck(env, { createClient, nowMs }),
+            regyboxCheck(env, { createClient, nowMs, kv }),
             calendarCheck(env, { fetchImpl, nowMs }),
           ])
         : []

@@ -1,3 +1,11 @@
+function formatHours(hours) {
+  const minutes = Math.round(hours * 60);
+  if (minutes % 60 === 0) {
+    return `${minutes / 60} ${minutes === 60 ? "hour" : "hours"}`;
+  }
+  return `${minutes} minutes`;
+}
+
 const fallbackPayload = {
   errorCode: "unexpected_failure",
   userTitle: "Unexpected enrollment failure",
@@ -12,12 +20,40 @@ const typedPayloads = {
   RegyboxLoginError: {
     errorCode: "login_error",
     userTitle: "Unable to log in to Regybox",
-    userMessage:
-      "The saved login session was rejected, so the automation could not access your account.",
+    userMessage: "The bot could not sign in to Regybox, so it could not reach your account.",
     userNextSteps: [
-      "Sign in to regybox.pt and copy fresh PHPSESSID and regybox_user cookies.",
-      "Update the GitHub secrets PHPSESSID and REGYBOX_USER.",
-      "Run the workflow again.",
+      "Open the status page: it shows whether Regybox rejected the email or password.",
+      "If your password changed, update REGIBOX_EMAIL or REGIBOX_PASSWORD under Settings → Variables and Secrets.",
+      "After a rejected password the bot waits until a secret changes (or 12 hours pass) before trying again, so it cannot lock your account.",
+    ],
+  },
+  ClassBlockedError: {
+    errorCode: "class_blocked",
+    userTitle: "Regybox won't let you book this class",
+    userMessage: "Regybox lists the class but does not offer a booking button for it.",
+    userNextSteps: [
+      "Open the class in the Regybox app to see why.",
+      "Common reasons: one class per type per day, a time clash with another booking, or no weekly credits left.",
+      "The bot keeps checking, so it books the class if the restriction goes away before class starts.",
+    ],
+  },
+  BookingRejectedError: {
+    errorCode: "booking_rejected",
+    userTitle: "Regybox refused the booking change",
+    userMessage: "Regybox answered the request but did not make the change.",
+    userNextSteps: [
+      "Read Regybox's message in the technical details below.",
+      "Check the class in the Regybox app.",
+    ],
+  },
+  CancellationClosedError: {
+    errorCode: "cancellation_closed",
+    userTitle: "Too late to cancel this class",
+    userMessage:
+      "The calendar event was removed, but Regybox no longer allows cancelling this class, so the booking is still active.",
+    userNextSteps: [
+      "Open the Regybox app and cancel there if it still lets you, or go to the class.",
+      "Next time, delete the calendar event earlier: Regybox stops cancellations some time before class.",
     ],
   },
   ClassNotFoundError: {
@@ -309,6 +345,24 @@ export function errorPayload(error, { platform } = {}) {
       const [, classType, classTime, classDate] = match;
       payload.userMessage = `No class matching '${classType}' at ${classTime} was found on ${classDate}.`;
     }
+  } else if (!bookr && error?.name === "RegyboxLoginError") {
+    const reason = String(error?.reason ?? "");
+    if (reason === "rejected" || reason === "rejected_recently") {
+      payload.userTitle = "Regybox rejected your email or password";
+      payload.userMessage =
+        "Regybox said the saved email or password is wrong, so the bot stopped signing in to avoid locking your account.";
+    }
+  } else if (!bookr && error?.name === "ClassBlockedError" && error?.reason) {
+    payload.userMessage = `Regybox lists the class but does not offer booking. It shows: "${String(error.reason).slice(0, 120)}".`;
+  } else if (!bookr && error?.name === "CancellationClosedError") {
+    const hours = Number(error?.cutoffHours);
+    const rule =
+      hours > 0
+        ? `Regybox only allows cancelling this class until ${formatHours(hours)} before it starts`
+        : "Regybox no longer allows cancelling this class";
+    payload.userMessage =
+      `The calendar event was removed, but ${rule}` +
+      `${error?.cancelDeadline ? ` (${error.cancelDeadline})` : ""}, so the booking is still active.`;
   } else if (!bookr && error?.name === "NoClassesFoundError") {
     const match = message.match(/^No classes found on (.+)$/);
     if (match) {

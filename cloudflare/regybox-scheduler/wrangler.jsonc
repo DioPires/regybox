@@ -11,7 +11,9 @@
   "keep_vars": true,
   "vars": {
     "BOOKING_PLATFORM": "regybox",
-    "CLASS_MAP": "CrossFit = WOD",
+    // Trend CrossFit (box 180). Calendar event titles (case-insensitive) on the
+    // left, class names exactly as Regybox's app3 shows them on the right.
+    "CLASS_MAP": "WOD = WOD; CrossFit = WOD; Open Box = OPEN BOX; OB = OPEN BOX; MAT = MAT; Pilates = MAT; Athletic MAT = ATHLETIC MAT; Senior MAT = SENIOR MAT; Weightlifting = WEIGHTLIFTING; WL = WEIGHTLIFTING; EMOM = EMOM CLUB; EMOM Club = EMOM CLUB; Partner WOD = PARTNER WOD; Trend CT = TREND CT; GYM = GYM",
     "TIMEZONE": "Europe/Lisbon",
     "LOOKAHEAD_HOURS": "73"
   },
@@ -20,8 +22,15 @@
       "binding": "REGYBOX_STATE"
     }
   ],
+  // Every 15 minutes, two minutes before each quarter hour, so classes that
+  // start at :15 or :45 (booking opens 48h earlier) are caught on time too.
   "triggers": {
-    "crons": ["28,58 * * * *"]
+    "crons": ["13,28,43,58 * * * *"]
+  },
+  // Lets the bot notice when a secret changes (each change is a new version)
+  // and retry a sign-in it paused after Regybox rejected the password.
+  "version_metadata": {
+    "binding": "CF_VERSION_METADATA"
   },
   "durable_objects": {
     "bindings": [{ "name": "BOOKR_COORDINATOR", "class_name": "BookrCoordinator" }]

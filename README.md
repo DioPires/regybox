@@ -14,6 +14,59 @@ a Cloudflare Worker checks your calendar every half hour and books classes
 directly, with no fixed schedule to maintain. ([Legacy setup instructions](docs/legacy-setups.md)
 remain available for existing installations.)
 
+## This Fork: Regybox App3 (Trend CrossFit)
+
+Some boxes, including Trend CrossFit (box 180), have moved to Regybox's newer
+member app at `regibox.pt/php8/app3/`. That app no longer accepts the
+`PHPSESSID`/`regybox_user` cookies the original Worker uses, so this fork's
+Worker signs in by itself:
+
+- It signs in with the email and password you save as the Worker secrets
+  `REGIBOX_EMAIL` and `REGIBOX_PASSWORD`, keeps the session in the Worker's KV
+  storage, and signs in again whenever Regybox ends the session.
+- If Regybox rejects the password, it stops signing in until you change a secret
+  (or 12 hours pass), so repeated runs cannot lock your account.
+- Booking opens about 48 hours before class (Trend uses 48 hours or 48 hours
+  and 5 minutes, depending on the class). The Worker reads the exact opening
+  time from Regybox's countdown, runs every 15 minutes (`13,28,43,58 * * * *`)
+  and waits for the opening, so classes that start at :15 or :45 are booked on
+  time too.
+- A full class still offers booking in Regybox, which puts you on the waitlist.
+  The Worker does the same and tells you that you are on the waitlist.
+- To cancel, delete the calendar event. Some classes show their own cancellation
+  deadline (for example 8 hours or 1 hour before class); the booking email then
+  tells you that deadline. If Regybox no longer offers cancelling when the event
+  is deleted, the Worker emails you once that the booking is still active and
+  stops trying.
+- `CLASS_MAP` lives in `cloudflare/regybox-scheduler/wrangler.jsonc` and maps
+  calendar event titles (case-insensitive) to Trend's class names: `WOD`,
+  `OPEN BOX` (or `OB`), `MAT` (or `Pilates`), `ATHLETIC MAT`, `SENIOR MAT`,
+  `WEIGHTLIFTING` (or `WL`), `EMOM CLUB` (or `EMOM`), `PARTNER WOD`, `TREND CT`.
+
+Setup for this fork, in order:
+
+1. **Calendar.** In Google Calendar, create a new calendar just for classes to
+   book. Under its **Settings → Integrate calendar**, copy the
+   **Secret address in iCal format**.
+2. **Deploy.** In the Cloudflare dashboard, go to **Workers & Pages → Create →
+   Import a repository**, pick this repository, name the project
+   `regybox-scheduler`, set the path (root directory) to
+   `cloudflare/regybox-scheduler`, leave the build command empty and keep the
+   deploy command `npx wrangler deploy`. Every push to `main` redeploys.
+3. **Secrets.** Open the Worker, go to **Settings → Variables and Secrets**, and
+   add three values of type **Secret**: `REGIBOX_EMAIL`, `REGIBOX_PASSWORD` and
+   `CALENDAR_URL` (the iCal address from step 1).
+4. **Keep the status page private** with Cloudflare Access, as described in
+   [Keep the Status Page Private](#keep-the-status-page-private-recommended).
+5. **Check it.** Open the Worker's `workers.dev` link. "Regybox accepts your
+   login" means the Worker signed in from Cloudflare's servers.
+6. **Optional email.** Add `EMAIL_USERNAME`, `EMAIL_PASSWORD` (a Gmail
+   [App Password](https://myaccount.google.com/apppasswords)) and `EMAIL_TO` as
+   secrets, as described in [SMTP (Including Gmail)](#smtp-including-gmail).
+
+Do not install the automatic-updates app for this fork: upstream updates would
+replace the app3 client. Pull upstream changes by hand instead.
+
 ## One-Click Cloudflare Setup
 
 Everything runs in a free Cloudflare account that you own: your credentials stay

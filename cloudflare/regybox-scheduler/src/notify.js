@@ -85,6 +85,7 @@ export function composeEmail({
   runUrl,
   platform = "regybox",
   userIsWaitlisted = false,
+  note = "",
 }) {
   const operationName = operationLabel(operation);
   const operationNoun = operationName === "unenroll" ? "unenrollment" : "enrollment";
@@ -99,6 +100,9 @@ export function composeEmail({
       "",
       waitlisted ? "Your place in the class is not confirmed. Check the booking platform for waitlist updates." : "No errors were detected.",
     ];
+    if (configured(note)) {
+      bodyLines.push("", String(note));
+    }
     if (statusUrl) {
       bodyLines.push("", `Status page: ${statusUrl}`);
     }
@@ -258,6 +262,7 @@ export async function notifyResult({ env, kv, dispatch, result, statusUrl, runUr
         runUrl,
         platform,
         userIsWaitlisted: result.userIsWaitlisted === true,
+        note: result.note,
       }),
       { platform },
     );
