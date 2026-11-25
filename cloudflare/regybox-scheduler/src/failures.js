@@ -1,3 +1,11 @@
+function formatHours(hours) {
+  const minutes = Math.round(hours * 60);
+  if (minutes % 60 === 0) {
+    return `${minutes / 60} ${minutes === 60 ? "hour" : "hours"}`;
+  }
+  return `${minutes} minutes`;
+}
+
 const fallbackPayload = {
   errorCode: "unexpected_failure",
   userTitle: "Unexpected enrollment failure",
@@ -42,10 +50,10 @@ const typedPayloads = {
     errorCode: "cancellation_closed",
     userTitle: "Too late to cancel this class",
     userMessage:
-      "The calendar event was removed, but Regybox only allows cancelling until 8 hours before class, so the booking is still active.",
+      "The calendar event was removed, but Regybox no longer allows cancelling this class, so the booking is still active.",
     userNextSteps: [
       "Open the Regybox app and cancel there if it still lets you, or go to the class.",
-      "Next time, delete the calendar event at least 8 hours before class.",
+      "Next time, delete the calendar event earlier: Regybox stops cancellations some time before class.",
     ],
   },
   ClassNotFoundError: {
@@ -347,9 +355,13 @@ export function errorPayload(error, { platform } = {}) {
   } else if (!bookr && error?.name === "ClassBlockedError" && error?.reason) {
     payload.userMessage = `Regybox lists the class but does not offer booking. It shows: "${String(error.reason).slice(0, 120)}".`;
   } else if (!bookr && error?.name === "CancellationClosedError") {
-    const hours = Number(error?.cutoffHours) || 8;
+    const hours = Number(error?.cutoffHours);
+    const rule =
+      hours > 0
+        ? `Regybox only allows cancelling this class until ${formatHours(hours)} before it starts`
+        : "Regybox no longer allows cancelling this class";
     payload.userMessage =
-      `The calendar event was removed, but Regybox only allows cancelling until ${hours} hours before class` +
+      `The calendar event was removed, but ${rule}` +
       `${error?.cancelDeadline ? ` (${error.cancelDeadline})` : ""}, so the booking is still active.`;
   } else if (!bookr && error?.name === "NoClassesFoundError") {
     const match = message.match(/^No classes found on (.+)$/);

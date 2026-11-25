@@ -21,6 +21,8 @@ import {
   parseClasses,
   parseLoginForm,
   pickClass,
+  parseClassRules,
+  parseDurationMinutes,
   pickFirstClass,
   runOperation,
   sampleClasses,
@@ -36,6 +38,13 @@ const CLASS_DATE = "2026-11-27";
 // Lisbon is on UTC in November, so 06:30 local is 06:30Z.
 const CLASS_START_MS = Date.parse("2026-11-27T06:30:00Z");
 const OPENS_MS = CLASS_START_MS - 48 * 3_600_000;
+
+// A real Trend CrossFit class list for Fri 27 Nov 2026 (one class booked), with
+// session tokens replaced and some repeated cards removed. Fetched at FIXTURE_NOW.
+const FIXTURE_NOW = Date.parse("2026-11-25T15:26:52Z");
+async function realClassList() {
+  return readFile(join(testDirectory, "fixtures", "app3_classes_list.html"), "utf8");
+}
 
 async function loginForm() {
   // Captured from Regybox's app3 login page with session tokens replaced.
@@ -53,18 +62,29 @@ function card({
   timer,
   abre,
   action,
+  cutoff,
+  rulesSheet = false,
 }) {
+  // Classes with their own rules show them in the booking confirmation and in a
+  // "book_rules<id>" sheet placed just before the card.
+  const confirm = cutoff
+    ? `confirmar(&quot;Confirmação&lt;br&gt;Pode cancelar a reserva até ${cutoff} antes da aula.&lt;br&gt;Tem a certeza que deseja marcar?&quot;, &quot;CONFIRMAÇÃO DE RESERVA&quot;, () => { book_class('pages/classes/scripts/book_classes.php?id_aula=${id}&amp;plano=0&amp;acs=aa${id}&amp;x=bb${id}'); });`
+    : `inscreve_aula('pages/classes/scripts/book_classes.php?id_aula=${id}&amp;plano=0&amp;acs=aa${id}&amp;x=bb${id}')`;
+  const sheet = rulesSheet
+    ? `<div id="book_rules${id}" class="sheet-modal"><span>Cancelamentos até ${cutoff ?? "8 horas"} antes da aula</span><span>Marcações podem ser feitas até 2 dias de antecedência</span></div>`
+    : "";
+  const sheetLink = rulesSheet ? `<a class="sheet-open link" data-sheet="#book_rules${id}"></a>` : "";
   const timerHtml =
     timer === undefined
       ? ""
       : `<input type="hidden" class="timers" id="timer${id}"${abre === undefined ? "" : ` data-abre="${abre}"`} value="${timer}">`;
   const buttons = {
-    book: `<button class="button buts_inscrever but_insc${id}" onclick="inscreve_aula('pages/classes/scripts/book_classes.php?id_aula=${id}&amp;plano=0&amp;acs=aa${id}&amp;x=bb${id}')">RESERVAR</button>`,
+    book: `<button class="button buts_inscrever but_insc${id}" onclick="${confirm}">RESERVAR</button>`,
     cancel: `<button class="button buts_inscrever but_insc${id}" onclick="cancela_aula('pages/classes/scripts/cancel_class.php?id_aula=${id}&amp;acs=cc${id}&amp;x=dd${id}')">CANCELAR</button>`,
     evil: `<button class="button buts_inscrever" onclick="go('https://evil.example/php8/app3/pages/classes/scripts/book_classes.php?id_aula=${id}')">RESERVAR</button>`,
   };
-  return `<div class="filtro0" id="feed_time_slot1764225000">
-    <div class="row"><div class="col a_nome_aula">${name}</div><div class="col a_hora">${start} - ${end}</div></div>
+  return `${sheet}<div class="filtro0" id="feed_time_slot1764225000">
+    <div class="row"><div class="col a_nome_aula">${name}</div><div class="col a_hora">${start} - ${end}${sheetLink}</div></div>
     <div class="a_insc">${booked} de ${capacity}</div>
     <div class="a_info">${info}</div>
     ${timerHtml}${action ? buttons[action] : ""}
@@ -327,7 +347,7 @@ test("class cards parse into booking state", () => {
   const now = OPENS_MS + 60_000;
   const html = page(
     card({ id: 1, name: "WOD", start: "06:30", action: "book", timer: 172000, abre: "0" }),
-    card({ id: 2, name: "OPEN BOX", start: "08:30", end: "10:00", info: "Reserva confirmada", action: "cancel" }),
+    card({ id: 2, name: "OPEN BOX", start: "08:30", end: "10:00", info: "Reserva confirmada", action: "cancel", rulesSheet: true }),
     card({ id: 3, name: "MAT", start: "12:00", info: "Limite diário por tipo" }),
     card({ id: 4, name: "EMOM CLUB", start: "20:15", end: "21:00", timer: 3600, abre: "1" }),
     card({ id: 5, name: "WOD", start: "19:00", end: "20:00", booked: 16, capacity: 16 }),
@@ -340,9 +360,12 @@ test("class cards parse into booking state", () => {
   assert.equal(open.curCapacity, 5);
   assert.equal(open.maxCapacity, 16);
   assert.equal(open.startsAt, "2026-11-27T06:30:00+00:00");
+  assert.equal(open.cancelCutoffHours, null, "no rule shown, so none is assumed");
+  assert.equal(open.cancelDeadlineMs, null);
 
   assert.equal(booked.userIsEnrolled, true);
   assert.match(booked.unenrollUrl, /cancel_class\.php\?id_aula=2&acs=cc2&x=dd2$/);
+  assert.equal(booked.cancelCutoffHours, 8);
   assert.equal(booked.cancelDeadlineMs, Date.parse("2026-11-27T00:30:00Z"));
 
   assert.equal(blocked.userIsBlocked, true);
@@ -391,7 +414,15 @@ test("pickClass and pickFirstClass match name, time and date", () => {
   assert.throws(() => pickClass(classes, { classTime: "07:30", classType: "WOD", classDate: CLASS_DATE }), ClassNotFoundError);
 });
 
-function bookingServer({ opensAtMs, time, bookResponses = [], afterBook = "booked", startPage } = {}) {
+function bookingServer({
+  opensAtMs,
+  time,
+  bookResponses = [],
+  afterBook = "booked",
+  startPage,
+  cutoff = "8 horas",
+  extraActions = {},
+} = {}) {
   let booked = false;
   let calls = 0;
   const bookUrls = [];
@@ -404,14 +435,14 @@ function bookingServer({ opensAtMs, time, bookResponses = [], afterBook = "booke
               ? card({ info: "Reserva confirmada", action: "cancel" })
               : afterBook === "waitlist"
                 ? card({ info: "Lista de espera", action: "cancel" })
-                : card({ action: "book" }),
+                : card({ action: "book", cutoff }),
           );
         }
         if (startPage) {
           return startPage;
         }
         return time.now() >= opensAtMs
-          ? page(card({ action: "book" }))
+          ? page(card({ action: "book", cutoff }))
           : page(card({ timer: Math.round((opensAtMs - time.now()) / 1000), abre: "1" }));
       },
     },
@@ -426,6 +457,7 @@ function bookingServer({ opensAtMs, time, bookResponses = [], afterBook = "booke
         return response;
       },
       "cancel_class.php": () => ({ success: true, message: "Cancelado" }),
+      ...extraActions,
     },
   });
   return { server, bookUrls };
@@ -516,12 +548,72 @@ test("a refused booking surfaces Regybox's message", async () => {
   );
 });
 
-test("a full class with a waitlist offer is reported as full", async () => {
+test("booking a full class joins the waitlist, as in the member app", async () => {
   const time = clock(OPENS_MS + 1_000);
   const { server } = bookingServer({
     opensAtMs: OPENS_MS,
     time,
-    bookResponses: [{ success: false, message: "Aula lotada", wait_url: "pages/classes/scripts/wait.php" }],
+    afterBook: "waitlist",
+    bookResponses: [
+      { success: true, message: "Ficou em lista de espera", wait_url: "pages/classes/wait_list.php?id=101", mail_profs: [] },
+    ],
+  });
+  const result = await runOperation({
+    client: client(server, { now: time.now }),
+    classDate: CLASS_DATE,
+    classTime: "06:30",
+    classType: "WOD",
+    now: time.now,
+    sleep: time.sleep,
+  });
+  assert.equal(result.status, "success");
+  assert.equal(result.userIsWaitlisted, true);
+  assert.equal(
+    server.requests.some(({ url }) => url.pathname.endsWith("/wait_list.php")),
+    false,
+    "the waitlist panel is only shown by the app, not fetched",
+  );
+});
+
+test("after booking, the coach notification URLs Regybox returns are called like the app does", async () => {
+  const time = clock(OPENS_MS + 1_000);
+  const { server } = bookingServer({
+    opensAtMs: OPENS_MS,
+    time,
+    bookResponses: [
+      {
+        success: true,
+        message: "Reservado com sucesso",
+        wait_url: "",
+        mail_profs: ["/php8/app3/pages/classes/scripts/mail_profs.php?id=101&amp;p=7", "https://evil.example/x"],
+      },
+    ],
+    extraActions: { "mail_profs.php": () => ({ ok: true }) },
+  });
+  const traces = [];
+  const result = await runOperation({
+    client: client(server, { now: time.now }),
+    classDate: CLASS_DATE,
+    classTime: "06:30",
+    classType: "WOD",
+    now: time.now,
+    sleep: time.sleep,
+    onTrace: async (event) => traces.push(event.code),
+  });
+  assert.equal(result.status, "success");
+  const mails = server.requests.filter(({ url }) => url.pathname.endsWith("/mail_profs.php"));
+  assert.equal(mails.length, 1);
+  assert.equal(mails[0].url.search, "?id=101&p=7");
+  assert.match(mails[0].options.headers.Cookie, /PHPSESSID=/);
+  assert.equal(server.requests.some(({ url }) => url.hostname === "evil.example"), false);
+});
+
+test("a full class Regybox refuses to book is reported as full", async () => {
+  const time = clock(OPENS_MS + 1_000);
+  const { server } = bookingServer({
+    opensAtMs: OPENS_MS,
+    time,
+    bookResponses: [{ success: false, message: "Aula lotada" }],
   });
   await assert.rejects(
     () =>
@@ -628,7 +720,7 @@ test("unenroll cancels a booked class before the cutoff", async () => {
 
 test("unenroll after the cutoff raises CancellationClosedError without calling Regybox", async () => {
   const time = clock(CLASS_START_MS - 2 * 3_600_000);
-  const { server } = bookingServer({ time, startPage: page(card({ info: "Reserva confirmada" })) });
+  const { server } = bookingServer({ time, startPage: page(card({ info: "Reserva confirmada", rulesSheet: true })) });
   await assert.rejects(
     () =>
       runOperation({
@@ -645,6 +737,27 @@ test("unenroll after the cutoff raises CancellationClosedError without calling R
       error.cancelDeadline === "Thu 26 Nov, 22:30",
   );
   assert.equal(server.requests.some(({ url }) => url.pathname.endsWith("/cancel_class.php")), false);
+});
+
+test("a booked class without a cancel button and no shown rule is reported as closed", async () => {
+  const time = clock(CLASS_START_MS - 30 * 60_000);
+  const { server } = bookingServer({ time, startPage: page(card({ info: "Reserva confirmada" })) });
+  await assert.rejects(
+    () =>
+      runOperation({
+        client: client(server, { now: time.now }),
+        operation: "unenroll",
+        classDate: CLASS_DATE,
+        classTime: "06:30",
+        classType: "WOD",
+        now: time.now,
+      }),
+    (error) =>
+      error instanceof CancellationClosedError &&
+      error.cutoffHours === null &&
+      error.cancelDeadline === "" &&
+      /no longer offers cancelling/.test(error.message),
+  );
 });
 
 test("a cancellation Regybox refuses for its deadline becomes CancellationClosedError", async () => {
@@ -761,4 +874,202 @@ test("sampleClasses counts every card and parses only the first few", () => {
   const { total, sample } = sampleClasses(html, { date: CLASS_DATE, now: OPENS_MS, limit: 2 });
   assert.equal(total, 6);
   assert.deepEqual(sample.map(({ start }) => start), ["10:00", "11:00"]);
+});
+
+// Real Regybox responses captured while booking and cancelling a test class.
+const REAL_BOOK_RESPONSE = {
+  cal_gcal: "",
+  cal_ics: "",
+  cal_sinc: "",
+  mail_profs: [],
+  message: "Reservado com sucesso",
+  notifs_aulas: "s",
+  success: true,
+  wait_url: "",
+};
+const REAL_CANCEL_RESPONSE = {
+  cal_sinc: "",
+  mail_url: "",
+  message: "Reserva cancelada com sucesso",
+  notifs_aulas: "s",
+  sms_url: "",
+  success: true,
+};
+
+test("parseDurationMinutes reads Regybox's rule durations", () => {
+  assert.equal(parseDurationMinutes("8 horas"), 480);
+  assert.equal(parseDurationMinutes("1 hora"), 60);
+  assert.equal(parseDurationMinutes("2 dias"), 2880);
+  assert.equal(parseDurationMinutes("2 dias e  5 minutos"), 2885);
+  assert.equal(parseDurationMinutes("do início"), null);
+});
+
+test("the real class list's rule sheets are read per class", async () => {
+  const rules = parseClassRules(await realClassList());
+  assert.deepEqual([...rules.keys()], ["43274", "43275", "43276", "43277"]);
+  assert.deepEqual(rules.get("43274"), { cancelCutoffMinutes: 480, bookingWindowMinutes: 2880 });
+  assert.deepEqual(rules.get("43276"), { cancelCutoffMinutes: 60, bookingWindowMinutes: 2885 });
+});
+
+test("the real class list parses into the states the app shows", async () => {
+  const classes = parseClasses(await realClassList(), { date: CLASS_DATE, now: FIXTURE_NOW });
+  assert.deepEqual(
+    classes.map((class_) => `${class_.start} ${class_.name}`),
+    [
+      "06:30 WOD",
+      "06:30 OPEN BOX",
+      "07:20 MAT",
+      "07:30 WOD",
+      "07:30 OPEN BOX",
+      "08:30 OPEN BOX",
+      "09:30 OPEN BOX",
+      "12:30 WOD",
+      "17:00 WOD",
+      "17:00 OPEN BOX",
+    ],
+  );
+  const [fullWod, limited, mat, , , , booked, openWod, notOpen] = classes;
+
+  // A full class still offers RESERVAR (booking it joins the waitlist).
+  assert.equal(fullWod.isOpen, true);
+  assert.equal(fullWod.isFull, true);
+  assert.equal(fullWod.isOverbooked, false);
+  assert.match(fullWod.enrollUrl, /book_classes\.php\?id_aula=43274&plano=0&acs=ACSTOKEN&x=XTOKEN$/);
+  assert.equal(fullWod.cancelCutoffHours, 8);
+  assert.equal(fullWod.cancelDeadlineMs, Date.parse("2026-11-26T22:30:00Z"));
+  assert.equal(fullWod.timeToEnroll, null);
+
+  assert.equal(limited.isOpen, false);
+  assert.equal(limited.blockedReason, "Limite diário por tipo");
+
+  assert.equal(mat.cancelCutoffHours, 1);
+  assert.equal(mat.bookingWindowHours, 2885 / 60);
+
+  assert.equal(booked.userIsEnrolled, true);
+  assert.equal(booked.isOpen, false);
+  assert.match(booked.unenrollUrl, /cancel_class\.php\?id_aula=43280&acs=ACSTOKEN&x=XTOKEN$/);
+  assert.equal(booked.cancelCutoffHours, null);
+
+  assert.equal(openWod.isOpen, true);
+  assert.equal(openWod.cancelCutoffHours, null);
+  assert.equal(openWod.cancelDeadlineMs, null);
+
+  assert.equal(notOpen.isOpen, false);
+  assert.equal(notOpen.userIsBlocked, false);
+  assert.equal(notOpen.timeToEnroll, 5288);
+  // 17:00 minus 48 h 5 min: Regybox's countdown, not the 48-hour fallback.
+  assert.equal(FIXTURE_NOW + notOpen.timeToEnroll * 1000, Date.parse("2026-11-25T16:55:00Z"));
+});
+
+function realListServer(html, { afterBook } = {}) {
+  let current = html;
+  const calls = { book: [], cancel: [] };
+  const server = fakeRegibox({
+    pages: { [CLASS_DATE]: () => current },
+    actions: {
+      "book_classes.php": (url) => {
+        calls.book.push(url);
+        current = afterBook ? afterBook(current, url) : current;
+        return REAL_BOOK_RESPONSE;
+      },
+      "cancel_class.php": (url) => {
+        calls.cancel.push(url);
+        return REAL_CANCEL_RESPONSE;
+      },
+    },
+  });
+  return { server, calls };
+}
+
+function markBooked(html, url) {
+  const id = url.searchParams.get("id_aula");
+  return html.replace(
+    `book_class ('pages/classes/scripts/book_classes.php?id_aula=${id}&plano=0&acs=ACSTOKEN&x=XTOKEN')`,
+    `cancel_class('pages/classes/scripts/cancel_class.php?id_aula=${id}&acs=ACSTOKEN&x=XTOKEN')`,
+  );
+}
+
+test("booking an open class on the real list sends its own booking URL and confirms it", async () => {
+  const html = await realClassList();
+  const { server, calls } = realListServer(html, { afterBook: markBooked });
+  const time = clock(FIXTURE_NOW);
+  const result = await runOperation({
+    client: client(server, { now: time.now }),
+    classDate: CLASS_DATE,
+    classTime: "12:30",
+    classType: "WOD",
+    now: time.now,
+    sleep: time.sleep,
+  });
+  assert.equal(result.status, "success");
+  assert.equal(calls.book.length, 1);
+  assert.equal(calls.book[0].searchParams.get("id_aula"), "43282");
+  assert.equal(calls.book[0].searchParams.get("conf"), null);
+  assert.equal(result.note, "To cancel, delete the calendar event. Regybox decides how close to class it still allows cancelling.");
+});
+
+test("booking a class with its own rules states that class's cancel deadline", async () => {
+  const html = await realClassList();
+  const { server } = realListServer(html, { afterBook: markBooked });
+  const time = clock(FIXTURE_NOW);
+  const result = await runOperation({
+    client: client(server, { now: time.now }),
+    classDate: CLASS_DATE,
+    classTime: "07:20",
+    classType: "MAT",
+    now: time.now,
+    sleep: time.sleep,
+  });
+  assert.equal(result.status, "success");
+  assert.equal(
+    result.note,
+    "To cancel, delete the calendar event before Fri 27 Nov, 06:20 (Regybox allows cancelling this class until 1 hour before it starts).",
+  );
+});
+
+test("the booked class on the real list is a noop to book and cancels with its own URL", async () => {
+  const html = await realClassList();
+  const { server, calls } = realListServer(html);
+  const time = clock(FIXTURE_NOW);
+  const options = { classDate: CLASS_DATE, classTime: "09:30", classType: "OPEN BOX", now: time.now, sleep: time.sleep };
+  const enroll = await runOperation({ client: client(server, { now: time.now }), ...options });
+  assert.equal(enroll.status, "noop");
+  assert.equal(calls.book.length, 0);
+
+  const cancel = await runOperation({ client: client(server, { now: time.now }), operation: "unenroll", ...options });
+  assert.equal(cancel.status, "success");
+  assert.equal(calls.cancel.length, 1);
+  assert.equal(calls.cancel[0].searchParams.get("id_aula"), "43280");
+});
+
+test("a daily-limit class on the real list is reported as blocked", async () => {
+  const html = await realClassList();
+  const { server, calls } = realListServer(html);
+  const time = clock(FIXTURE_NOW);
+  await assert.rejects(
+    () =>
+      runOperation({
+        client: client(server, { now: time.now }),
+        classDate: CLASS_DATE,
+        classTime: "08:30",
+        classType: "OPEN BOX",
+        now: time.now,
+        sleep: time.sleep,
+      }),
+    (error) => error instanceof ClassBlockedError && /Limite diário por tipo/.test(error.message),
+  );
+  assert.equal(calls.book.length, 0);
+});
+
+test("sampleClasses reads the real list's first cards", async () => {
+  const { total, sample } = sampleClasses(await realClassList(), { date: CLASS_DATE, now: FIXTURE_NOW, limit: 3 });
+  assert.equal(total, 10);
+  assert.deepEqual(
+    sample.map((class_) => [class_.name, class_.cancelCutoffHours]),
+    [
+      ["WOD", 8],
+      ["OPEN BOX", 8],
+      ["MAT", 1],
+    ],
+  );
 });

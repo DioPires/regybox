@@ -26,12 +26,18 @@ Worker signs in by itself:
   storage, and signs in again whenever Regybox ends the session.
 - If Regybox rejects the password, it stops signing in until you change a secret
   (or 12 hours pass), so repeated runs cannot lock your account.
-- Booking opens 48 hours before class. The Worker runs every 15 minutes
-  (`13,28,43,58 * * * *`), so classes that start at :15 or :45 are booked on time.
-- Regybox only allows cancelling until 8 hours before class. Delete the calendar
-  event before then to cancel; the booking email tells you the deadline. If you
-  delete it later, the Worker emails you once that the booking is still active
-  and stops trying.
+- Booking opens about 48 hours before class (Trend uses 48 hours or 48 hours
+  and 5 minutes, depending on the class). The Worker reads the exact opening
+  time from Regybox's countdown, runs every 15 minutes (`13,28,43,58 * * * *`)
+  and waits for the opening, so classes that start at :15 or :45 are booked on
+  time too.
+- A full class still offers booking in Regybox, which puts you on the waitlist.
+  The Worker does the same and tells you that you are on the waitlist.
+- To cancel, delete the calendar event. Some classes show their own cancellation
+  deadline (for example 8 hours or 1 hour before class); the booking email then
+  tells you that deadline. If Regybox no longer offers cancelling when the event
+  is deleted, the Worker emails you once that the booking is still active and
+  stops trying.
 - `CLASS_MAP` lives in `cloudflare/regybox-scheduler/wrangler.jsonc` and maps
   calendar event titles (case-insensitive) to Trend's class names: `WOD`,
   `OPEN BOX` (or `OB`), `MAT` (or `Pilates`), `ATHLETIC MAT`, `SENIOR MAT`,

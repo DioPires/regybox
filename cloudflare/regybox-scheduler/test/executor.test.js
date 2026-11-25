@@ -721,7 +721,7 @@ test("a cancellation past the cutoff stops further cancel attempts and reports o
   assert.equal(state.classType, "WOD");
   assert.equal(failures.length, 1);
   assert.equal(failures[0].payload.errorCode, "cancellation_closed");
-  assert.match(failures[0].payload.userMessage, /8 hours before class \(Sat 11 Jul, 22:30\)/);
+  assert.match(failures[0].payload.userMessage, /until 8 hours before it starts \(Sat 11 Jul, 22:30\)/);
 });
 
 test("the worker passes credentials, KV and version to the Regybox client", async () => {

@@ -8,8 +8,12 @@ import { parseFragment } from "parse5";
 export const REGIBOX_ORIGIN = "https://www.regibox.pt";
 export const APP_BASE = `${REGIBOX_ORIGIN}/php8/app3/`;
 export const DEFAULT_BOX_ID = "180";
+// Fallbacks for classes whose card does not show its own rules. Regybox's
+// countdown timer, when present, always wins over the booking window. Most of
+// Trend's classes show no cancellation rule, so by default the bot does not
+// assume one and lets Regybox decide (it removes the CANCELAR button).
 export const DEFAULT_BOOKING_WINDOW_HOURS = 48;
-export const DEFAULT_CANCEL_CUTOFF_HOURS = 8;
+export const DEFAULT_CANCEL_CUTOFF_HOURS = null;
 export const SESSION_KEY = "regybox:v1:regibox:session";
 export const LOGIN_REJECTED_KEY = "regybox:v1:regibox:login-rejected";
 
@@ -41,6 +45,18 @@ const BLOCKED_RE =
 const FULL_RE = /lotad[oa]|esgotad[oa]|complet[oa]|cheia|sem vagas|\bfull\b/i;
 const ALREADY_BOOKED_RE = /j[áa]\s.*(?:inscrit|reservad|marcad)|already\s+(?:enrolled|registered|booked)/i;
 const CANCEL_CLOSED_RE = /prazo|tarde demais|n[ãa]o (?:[ée] )?poss[ií]vel cancelar|j[áa] n[ãa]o (?:pode|[ée] poss[ií]vel)|too late/i;
+// Per-class rules: the "Regras de marcação e cancelamento" sheet (one per class
+// with special rules, outside the card) and the booking button's confirmation.
+const RULES_SHEET_RE = /\bid\s*=\s*["']book_rules(\d+)["']/gi;
+const RULES_SHEET_LINK_RE = /^#book_rules(\d+)$/;
+const CANCEL_RULE_RE = /cancel(?:amentos|ar a reserva)\s+at[ée]\s+([^<.]{1,60}?)\s+antes d[ao]/i;
+const BOOKING_WINDOW_RULE_RE = /marca[çc][õo]es podem ser feitas at[ée]\s+([^<.]{1,60}?)\s+de anteced[êe]ncia/i;
+const DURATION_PART_RE = /(\d+)\s*(semanas?|dias?|horas?|minutos?)\b/gi;
+const DURATION_UNIT_MINUTES = { semana: 10_080, dia: 1_440, hora: 60, minuto: 1 };
+// After booking or cancelling, the member app fires these Regybox URLs to email
+// the coach or the member promoted from the waitlist. The bot does the same.
+const FOLLOW_UP_FIELDS = ["mail_profs", "mail_url", "sms_url"];
+const MAX_FOLLOW_UPS = 5;
 
 export class RegyboxLoginError extends Error {
   constructor(message = "Unable to log in", { reason = "unexpected", detail } = {}) {
@@ -128,14 +144,14 @@ export class BookingRejectedError extends Error {
   }
 }
 
-/** The booking can no longer be cancelled (Regybox allows it only until N hours before class). */
+/** The booking can no longer be cancelled (Regybox stops cancellations some time before class). */
 export class CancellationClosedError extends Error {
-  constructor({ cancelDeadline = "", cutoffHours = DEFAULT_CANCEL_CUTOFF_HOURS, message = "" } = {}) {
+  constructor({ cancelDeadline = "", cutoffHours = null, message = "" } = {}) {
     const detail = message ? ` Regybox said: ${message}` : "";
-    super(
-      `Too late to cancel: Regybox only allows cancelling until ${cutoffHours} hours before class` +
-        `${cancelDeadline ? ` (deadline ${cancelDeadline})` : ""}.${detail}`,
-    );
+    const rule = cutoffHours
+      ? `Regybox only allows cancelling until ${formatHours(cutoffHours)} before class`
+      : "Regybox no longer offers cancelling this booking";
+    super(`Too late to cancel: ${rule}${cancelDeadline ? ` (deadline ${cancelDeadline})` : ""}.${detail}`);
     this.name = "CancellationClosedError";
     this.regyboxMessage = message;
     this.cancelDeadline = cancelDeadline;
@@ -548,6 +564,57 @@ function blockName(nodes) {
   return node ? textContent(node) : null;
 }
 
+/** Minutes in a Portuguese duration such as "8 horas", "1 hora" or "2 dias e 5 minutos". */
+export function parseDurationMinutes(text) {
+  let total = 0;
+  let found = false;
+  for (const [, amount, unit] of String(text ?? "").matchAll(DURATION_PART_RE)) {
+    const key = unit.toLowerCase().replace(/s$/, "");
+    total += Number.parseInt(amount, 10) * DURATION_UNIT_MINUTES[key];
+    found = true;
+  }
+  return found ? total : null;
+}
+
+function ruleMinutes(text, pattern) {
+  const match = String(text ?? "").match(pattern);
+  return match ? parseDurationMinutes(match[1]) : null;
+}
+
+/**
+ * Read the per-class rule sheets on a class list, keyed by class id. Only
+ * classes with special rules have one; the regex pass is cheap enough to run on
+ * every poll, unlike a full HTML parse.
+ */
+export function parseClassRules(html) {
+  const text = String(html ?? "");
+  const rules = new Map();
+  const starts = [...text.matchAll(RULES_SHEET_RE)];
+  starts.forEach((match, index) => {
+    const end = Math.min(starts[index + 1]?.index ?? text.length, match.index + 4000);
+    let sheet = text.slice(match.index, end);
+    const nextCard = sheet.search(/\bfiltro0\b/);
+    if (nextCard > 0) {
+      sheet = sheet.slice(0, nextCard);
+    }
+    rules.set(match[1], {
+      cancelCutoffMinutes: ruleMinutes(sheet, CANCEL_RULE_RE),
+      bookingWindowMinutes: ruleMinutes(sheet, BOOKING_WINDOW_RULE_RE),
+    });
+  });
+  return rules;
+}
+
+/** "8 hours", "1 hour", "30 minutes". */
+export function formatHours(hours) {
+  const minutes = Math.round(Number(hours) * 60);
+  if (minutes % 60 === 0) {
+    const whole = minutes / 60;
+    return `${whole} ${whole === 1 ? "hour" : "hours"}`;
+  }
+  return `${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
+}
+
 export function parseCapacity(value) {
   const normalized = String(value).trim();
   if (normalized === "∞") {
@@ -559,6 +626,25 @@ export function parseCapacity(value) {
   return Number.parseInt(normalized, 10);
 }
 
+function blockRules(nodes, rules) {
+  let sheetRules = null;
+  let buttonCutoff = null;
+  for (const node of nodes) {
+    const attrs = attributes(node);
+    const sheetId = attrs["data-sheet"]?.match(RULES_SHEET_LINK_RE)?.[1];
+    if (sheetId && rules?.has(sheetId)) {
+      sheetRules ??= rules.get(sheetId);
+    }
+    if (attrs.onclick && /book_classes\.php/i.test(attrs.onclick)) {
+      buttonCutoff ??= ruleMinutes(attrs.onclick, CANCEL_RULE_RE);
+    }
+  }
+  return {
+    cancelCutoffMinutes: sheetRules?.cancelCutoffMinutes ?? buttonCutoff,
+    bookingWindowMinutes: sheetRules?.bookingWindowMinutes ?? null,
+  };
+}
+
 function parseClassBlock(
   block,
   {
@@ -568,6 +654,7 @@ function parseClassBlock(
     boxId = DEFAULT_BOX_ID,
     bookingWindowHours = DEFAULT_BOOKING_WINDOW_HOURS,
     cancelCutoffHours = DEFAULT_CANCEL_CUTOFF_HOURS,
+    rules = null,
   } = {},
 ) {
   const nodes = descendants(block);
@@ -596,7 +683,9 @@ function parseClassBlock(
       if (!Number.isFinite(value)) {
         throw new UnparseableError("Class card has an unreadable countdown");
       }
-      return { value, opens: attrs["data-abre"] === "1", closes: attrs["data-abre"] === "0" };
+      // data-abre="1" marks a countdown to booking opening; without it the
+      // countdown is to the class start.
+      return { value, opens: attrs["data-abre"] === "1" };
     });
   const { enrollUrl, unenrollUrl } = blockActions(block, boxId);
   const userIsWaitlisted = WAITLIST_RE.test(info);
@@ -608,9 +697,13 @@ function parseClassBlock(
   const blockedReason =
     !isOpen && !userIsEnrolled && !userIsWaitlisted && !isOver && BLOCKED_RE.test(info) ? info : null;
   const waitingToOpen = !isOpen && !userIsEnrolled && !userIsWaitlisted && !isOver && !blockedReason;
-  const computedOpensIn = Math.round((startMs - bookingWindowHours * 3_600_000 - now) / 1000);
-  const openingTimer =
-    timers.find((timer) => timer.opens) ?? (waitingToOpen ? timers.find((timer) => !timer.closes) : undefined);
+  const classRules = blockRules(nodes, rules);
+  const cancelCutoffMinutes =
+    classRules.cancelCutoffMinutes ??
+    (cancelCutoffHours === null || cancelCutoffHours === undefined ? null : Number(cancelCutoffHours) * 60);
+  const bookingWindowMinutes = classRules.bookingWindowMinutes ?? Number(bookingWindowHours) * 60;
+  const computedOpensIn = Math.round((startMs - bookingWindowMinutes * 60_000 - now) / 1000);
+  const openingTimer = timers.find((timer) => timer.opens);
   let timeToEnroll = null;
   if (waitingToOpen) {
     timeToEnroll = openingTimer ? openingTimer.value : computedOpensIn > 0 ? computedOpensIn : null;
@@ -622,8 +715,9 @@ function parseClassBlock(
     end: time.end,
     startsAt: zonedIso(startMs, timezone),
     startMs,
-    cancelDeadlineMs: startMs - cancelCutoffHours * 3_600_000,
-    cancelCutoffHours,
+    cancelDeadlineMs: cancelCutoffMinutes === null ? null : startMs - cancelCutoffMinutes * 60_000,
+    cancelCutoffHours: cancelCutoffMinutes === null ? null : cancelCutoffMinutes / 60,
+    bookingWindowHours: bookingWindowMinutes / 60,
     maxCapacity,
     curCapacity,
     info,
@@ -654,12 +748,13 @@ export function sampleClasses(html, { limit = 3, ...options } = {}) {
     const classes = parseClasses(html, options);
     return { total: classes.length, sample: classes.slice(0, limit) };
   }
+  const rules = parseClassRules(html);
   const sample = chunks.slice(0, limit).map((chunk) => {
     const block = chunkBlock(chunk);
     if (!block) {
       throw new UnparseableError("Class card could not be read");
     }
-    return parseClassBlock(block, options);
+    return parseClassBlock(block, { ...options, rules });
   });
   return { total: chunks.length, sample };
 }
@@ -669,7 +764,8 @@ export function parseClasses(html, options = {}) {
   if (!options.date) {
     throw new Error("parseClasses requires the list's date");
   }
-  return classBlocks(parseFragment(String(html))).map((block) => parseClassBlock(block, options));
+  const rules = options.rules ?? parseClassRules(html);
+  return classBlocks(parseFragment(String(html))).map((block) => parseClassBlock(block, { ...options, rules }));
 }
 
 function parseClassesAtTime(html, { classTime, classTypes = [], ...options } = {}) {
@@ -678,6 +774,7 @@ function parseClassesAtTime(html, { classTime, classTypes = [], ...options } = {
     ? chunks.filter((chunk) => chunk.includes(classTime)).map(chunkBlock).filter(Boolean)
     : classBlocks(parseFragment(String(html)));
   const candidates = new Set(classTypes.map((name) => String(name).toUpperCase()));
+  const rules = parseClassRules(html);
   return {
     total: chunks.length || blocks.length,
     classes: blocks
@@ -687,7 +784,7 @@ function parseClassesAtTime(html, { classTime, classTypes = [], ...options } = {
         const name = blockName(nodes);
         return time?.start === classTime && (candidates.size === 0 || candidates.has(String(name).toUpperCase()));
       })
-      .map((block) => parseClassBlock(block, options)),
+      .map((block) => parseClassBlock(block, { ...options, rules })),
   };
 }
 
@@ -1018,6 +1115,56 @@ export function createRegyboxClient({
     return `${APP_BASE}pages/classes/classes_list.php?date=${date}&type=1&plano=0&box=`;
   }
 
+  // Same as the member app after a booking or cancellation: call the e-mail/SMS
+  // URLs Regybox returns (coach notice, member promoted from the waitlist).
+  // Best effort: the booking itself is already saved, so failures are only traced.
+  async function runFollowUps(data, base) {
+    const urls = FOLLOW_UP_FIELDS.flatMap((field) => (Array.isArray(data?.[field]) ? data[field] : [data?.[field]]))
+      .filter((value) => typeof value === "string" && value.trim())
+      .slice(0, MAX_FOLLOW_UPS);
+    for (const raw of urls) {
+      let url;
+      try {
+        url = new URL(decodeEntities(raw.trim()), base);
+      } catch {
+        continue;
+      }
+      if (url.origin !== REGIBOX_ORIGIN) {
+        await emitTrace({
+          level: "warn",
+          scope: "regybox",
+          code: "follow_up_skipped",
+          message: "Skipped a Regybox notification URL on another site",
+          data: { endpointPath: url.pathname },
+        });
+        continue;
+      }
+      try {
+        const headers = { "User-Agent": USER_AGENT, Referer: `${APP_BASE}pwa/${box}/` };
+        if (jar.size) {
+          headers.Cookie = jar.header();
+        }
+        const response = await fetchImpl(url.href, { method: "GET", headers, redirect: "manual" });
+        await response.body?.cancel?.();
+        await emitTrace({
+          level: response.ok ? "info" : "warn",
+          scope: "regybox",
+          code: "follow_up_sent",
+          message: `Regybox notification request returned HTTP ${response.status}`,
+          data: { endpointPath: url.pathname, httpStatus: response.status },
+        });
+      } catch {
+        await emitTrace({
+          level: "warn",
+          scope: "regybox",
+          code: "follow_up_failed",
+          message: "Regybox notification request failed",
+          data: { endpointPath: url.pathname },
+        });
+      }
+    }
+  }
+
   function actionUrl(url, operation) {
     const parsed = new URL(url);
     const match = parsed.origin === REGIBOX_ORIGIN ? parsed.pathname.match(ACTION_PATH_RE) : null;
@@ -1063,7 +1210,14 @@ export function createRegyboxClient({
         }
         throw new BookingRejectedError(message, { operation: "enroll" });
       }
-      return { message, confirmedInsideCancelWindow, userIsWaitlisted: WAITLIST_RE.test(message) };
+      await runFollowUps(data, target);
+      // A full class still offers RESERVAR; booking it joins the waitlist and
+      // Regybox answers success with a wait_url (the app then shows the queue).
+      return {
+        message,
+        confirmedInsideCancelWindow,
+        userIsWaitlisted: Boolean(data.wait_url) || WAITLIST_RE.test(message),
+      };
     },
     async unenroll(url) {
       const target = actionUrl(url, "unenroll");
@@ -1075,6 +1229,7 @@ export function createRegyboxClient({
         }
         throw new BookingRejectedError(message, { operation: "unenroll" });
       }
+      await runFollowUps(data, target);
       return { message };
     },
   };
@@ -1093,13 +1248,27 @@ function closedResult({ classType, timeToEnroll, now, timezone }) {
   });
 }
 
+function cancelDetails(selected, timezone) {
+  return {
+    cancelDeadline: selected.cancelDeadlineMs === null ? "" : formatLocalTime(selected.cancelDeadlineMs, timezone),
+    cutoffHours: selected.cancelCutoffHours,
+  };
+}
+
 function bookingNote(selected, { confirmedInsideCancelWindow, now, timezone }) {
-  if (confirmedInsideCancelWindow || selected.cancelDeadlineMs <= now) {
-    return `This booking was made less than ${selected.cancelCutoffHours} hours before class, so Regybox will not let you cancel it.`;
+  const hours = selected.cancelCutoffHours;
+  const deadline = selected.cancelDeadlineMs;
+  if (confirmedInsideCancelWindow || (deadline !== null && deadline <= now)) {
+    return hours
+      ? `This booking was made less than ${formatHours(hours)} before class, so Regybox will not let you cancel it.`
+      : "Regybox said this booking can no longer be cancelled, so deleting the calendar event will not cancel it.";
+  }
+  if (deadline === null) {
+    return "To cancel, delete the calendar event. Regybox decides how close to class it still allows cancelling.";
   }
   return (
-    `To cancel, delete the calendar event before ${formatLocalTime(selected.cancelDeadlineMs, timezone)} ` +
-    `(Regybox allows cancelling until ${selected.cancelCutoffHours} hours before class).`
+    `To cancel, delete the calendar event before ${formatLocalTime(deadline, timezone)} ` +
+    `(Regybox allows cancelling this class until ${formatHours(hours)} before it starts).`
   );
 }
 
@@ -1217,17 +1386,16 @@ export async function runOperation({
         continue;
       }
       if (!selected.unenrollUrl) {
-        if (now() >= selected.cancelDeadlineMs) {
+        // Regybox removes the CANCELAR button once cancelling is closed. When
+        // the class shows its cutoff, only trust that before the deadline.
+        if (selected.cancelDeadlineMs === null || now() >= selected.cancelDeadlineMs) {
           await emitTrace({
             level: "error",
             scope: "regybox",
             code: "cancellation_closed",
-            message: `Cancellation closed ${selected.cancelCutoffHours} hours before class; the booking stays`,
+            message: "Regybox no longer offers cancelling this class; the booking stays",
           });
-          throw new CancellationClosedError({
-            cancelDeadline: formatLocalTime(selected.cancelDeadlineMs, timezone),
-            cutoffHours: selected.cancelCutoffHours,
-          });
+          throw new CancellationClosedError(cancelDetails(selected, timezone));
         }
         throw new UnparseableError("Booked class has no cancel control", { actionEndpoints: [] });
       }
@@ -1241,11 +1409,7 @@ export async function runOperation({
         await client.unenroll(selected.unenrollUrl);
       } catch (error) {
         if (error instanceof CancellationClosedError && !error.cancelDeadline) {
-          throw new CancellationClosedError({
-            cancelDeadline: formatLocalTime(selected.cancelDeadlineMs, timezone),
-            cutoffHours: selected.cancelCutoffHours,
-            message: error.regyboxMessage,
-          });
+          throw new CancellationClosedError({ ...cancelDetails(selected, timezone), message: error.regyboxMessage });
         }
         throw error;
       }
@@ -1334,7 +1498,7 @@ export async function runOperation({
         ...(enrollment.confirmedInsideCancelWindow ? { cannotCancel: true } : {}),
         note: userIsWaitlisted
           ? undefined
-          : bookingNote(verified, {
+          : bookingNote(selected.cancelDeadlineMs !== null ? selected : verified, {
               confirmedInsideCancelWindow: enrollment.confirmedInsideCancelWindow,
               now: now(),
               timezone,
