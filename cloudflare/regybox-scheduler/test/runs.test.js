@@ -343,7 +343,7 @@ test("recorder write failures never break enrollment execution", async () => {
   console.log = () => {};
   try {
     const summary = await executePlan({
-      env: { PHPSESSID: "session", REGYBOX_USER: "user" },
+      env: { REGIBOX_EMAIL: "member@example.test", REGIBOX_PASSWORD: "test-password" },
       kv,
       dispatches: [{
         operation: "enroll",

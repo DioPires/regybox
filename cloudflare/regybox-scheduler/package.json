@@ -26,11 +26,11 @@
       "BOOKING_PLATFORM": {
         "description": "Booking platform to use: regybox (default) or bookr. Set this text variable to bookr when your box uses Bookr.fit."
       },
-      "PHPSESSID": {
-        "description": "Copy this cookie value from regybox.pt developer tools so the Worker can sign in."
+      "REGIBOX_EMAIL": {
+        "description": "Required for Regybox (app3). The email you sign in to the Regybox app with. Save it as a secret."
       },
-      "REGYBOX_USER": {
-        "description": "Copy this cookie value from regybox.pt developer tools so the Worker can identify your account."
+      "REGIBOX_PASSWORD": {
+        "description": "Required for Regybox (app3). Your Regybox password. Save it as a secret; the Worker signs in with it and never shows it."
       },
       "BOOKR_AUTH_COOKIE": {
         "description": "Required only when BOOKING_PLATFORM is bookr. Paste only the Bookr Supabase auth cookie pair(s), including every present numbered chunk in order, as a Worker secret; never use a text variable."

@@ -1,7 +1,13 @@
 import { buildFailureFingerprint, errorPayload, safeErrorMessage, safeErrorValue } from "./failures.js";
 import { notifyFailure, notifyResult, prepareWaitlistNotification } from "./notify.js";
 import { createBookrClient, runBookrOperation } from "./bookr.js";
-import { UnparseableError, createRegyboxClient, runOperation } from "./regybox.js";
+import {
+  DEFAULT_BOOKING_WINDOW_HOURS,
+  DEFAULT_CANCEL_CUTOFF_HOURS,
+  UnparseableError,
+  createRegyboxClient,
+  runOperation,
+} from "./regybox.js";
 import { recordIncident, resolveStatusUrl } from "./incidents.js";
 import { bookingPlatform, platformLabel } from "./platform.js";
 
@@ -22,9 +28,44 @@ function configured(value) {
   return Boolean(String(value ?? "").trim());
 }
 
+const REGIBOX_CREDENTIALS = ["REGIBOX_EMAIL", "REGIBOX_PASSWORD"];
+
 function missingConfiguration(env) {
-  return ["GITHUB_TOKEN", "GITHUB_OWNER", "GITHUB_REPO", "PHPSESSID", "REGYBOX_USER"].filter(
+  return ["GITHUB_TOKEN", "GITHUB_OWNER", "GITHUB_REPO", ...REGIBOX_CREDENTIALS].filter(
     (name) => !configured(env[name]),
+  );
+}
+
+function positiveNumber(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/** Options shared by every Regybox (app3) client the Worker creates. */
+export function regyboxClientOptions(env, kv) {
+  return {
+    email: env.REGIBOX_EMAIL,
+    password: env.REGIBOX_PASSWORD,
+    boxId: env.REGIBOX_BOX_ID || undefined,
+    kv,
+    versionId: env.CF_VERSION_METADATA?.id ?? null,
+    timezone: env.TIMEZONE || "Europe/Lisbon",
+    bookingWindowHours: positiveNumber(env.BOOKING_OPENS_HOURS, DEFAULT_BOOKING_WINDOW_HOURS),
+    cancelCutoffHours: positiveNumber(env.CANCEL_CUTOFF_HOURS, DEFAULT_CANCEL_CUTOFF_HOURS),
+  };
+}
+
+async function markCancellationClosed({ kv, details }) {
+  if (!details.cacheKey) {
+    return;
+  }
+  const cached = parseCachedValue(await kv.get(details.cacheKey));
+  // Leaving "enrolled" stops the planner from retrying a cancellation that
+  // Regybox can no longer accept; the class stays booked.
+  await kv.put(
+    details.cacheKey,
+    JSON.stringify({ ...cached, state: "cancel_closed" }),
+    { expirationTtl: STATE_TTL_SECONDS },
   );
 }
 
@@ -188,12 +229,12 @@ export function executionMode(env) {
   if (["GITHUB_TOKEN", "GITHUB_OWNER", "GITHUB_REPO"].every((name) => configured(env[name]))) {
     return "dispatch";
   }
-  if (["PHPSESSID", "REGYBOX_USER"].every((name) => configured(env[name]))) {
+  if (REGIBOX_CREDENTIALS.every((name) => configured(env[name]))) {
     return "worker";
   }
   throw new Error(
     `Missing scheduler configuration variables: ${missingConfiguration(env).join(", ")}. ` +
-      "Configure GitHub dispatch (GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO) or worker execution (PHPSESSID, REGYBOX_USER).",
+      "Configure worker execution (REGIBOX_EMAIL, REGIBOX_PASSWORD) as Worker secrets.",
   );
 }
 
@@ -379,9 +420,7 @@ export async function executePlan({
             onTrace: (event) => recordTrace(recorder, event),
           })
         : createClient({
-            phpsessid: env.PHPSESSID,
-            regyboxUser: env.REGYBOX_USER,
-            timezone: env.TIMEZONE || "Europe/Lisbon",
+            ...regyboxClientOptions(env, kv),
             now,
             onTrace: (event) => recordTrace(recorder, event),
           });
@@ -487,6 +526,13 @@ export async function executePlan({
           message: `${operationDescription(details)} failed (${payload.errorCode})`,
           data: { operation: details.operation, outcome: "failure", errorCode: payload.errorCode },
         });
+        if (error?.name === "CancellationClosedError" && details.operation === "unenroll") {
+          try {
+            await markCancellationClosed({ kv, details });
+          } catch (stateError) {
+            console.warn("regybox: cancellation-closed state write failed:", safeErrorValue(stateError, { platform }));
+          }
+        }
         await reportFailure({ dispatch, error, payload, fingerprint });
         continue;
       }

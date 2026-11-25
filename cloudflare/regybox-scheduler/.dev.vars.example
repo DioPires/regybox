@@ -1,6 +1,7 @@
-# Required only for direct Regybox Worker enrollment. Copy these cookie values from regybox.pt developer tools.
-PHPSESSID=
-REGYBOX_USER=
+# Required for Regybox (app3) Worker enrollment: the email and password you use
+# in the Regybox app. Keep this file local and never commit it.
+REGIBOX_EMAIL=
+REGIBOX_PASSWORD=
 
 # Required only for direct Bookr.fit Worker enrollment. Copy only the present
 # sb-jphimrpybgssduyuziaw-auth-token name=value pair, or every numbered chunk

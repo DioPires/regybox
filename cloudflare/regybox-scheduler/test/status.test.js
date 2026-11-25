@@ -28,8 +28,8 @@ function makeKv(entries = {}) {
 
 function workerEnv(overrides = {}) {
   return {
-    PHPSESSID: "sess",
-    REGYBOX_USER: "123",
+    REGIBOX_EMAIL: "member@example.test",
+    REGIBOX_PASSWORD: "test-password",
     CALENDAR_URL: "https://calendar.example.test/feed.ics",
     CALENDAR_EVENT_NAMES: "CrossFit",
     ...overrides,
@@ -54,10 +54,10 @@ test("a fully configured worker shows green setup and live checks", async () => 
   });
   assert.equal(model.mode, "self-contained");
   const texts = flatChecks(model).map((item) => `${item.level}:${item.text}`);
-  assert.ok(texts.some((text) => text === "ok:Regybox cookies are set"));
+  assert.ok(texts.some((text) => text === "ok:Regybox email and password are set"));
   assert.ok(texts.some((text) => text === "ok:Calendar link is set"));
   assert.ok(texts.some((text) => text.startsWith("off:Email notifications are off")));
-  assert.ok(texts.some((text) => text === "ok:Regybox accepts your login"));
+  assert.ok(texts.some((text) => text === "ok:Regybox accepts your login (0 classes listed today)"));
   assert.ok(texts.some((text) => /^ok:Calendar is reachable — 1 upcoming/.test(text)));
   assert.ok(texts.some((text) => text.startsWith("warn:The scheduler has not run yet")));
 });
@@ -82,9 +82,10 @@ test("missing configuration produces actionable hints and no live checks", async
   }
 });
 
-test("an expired cookie is reported as an expired login with remediation", async () => {
+test("a rejected password is reported with remediation", async () => {
   const loginError = new Error("login");
   loginError.name = "RegyboxLoginError";
+  loginError.reason = "rejected";
   const model = await buildStatusModel({
     env: workerEnv({ CALENDAR_URL: "" }),
     kv: makeKv(),
@@ -96,10 +97,41 @@ test("an expired cookie is reported as an expired login with remediation", async
     }),
   });
   const rejected = flatChecks(model).find((item) =>
-    item.text.startsWith("Regybox rejected your login"),
+    item.text.startsWith("Regybox rejected your email or password"),
   );
   assert.equal(rejected?.level, "bad");
-  assert.match(rejected.hint, /PHPSESSID/);
+  assert.match(rejected.hint, /REGIBOX_PASSWORD/);
+});
+
+test("other sign-in failures are reported without blaming the password", async () => {
+  const loginError = new Error("login");
+  loginError.name = "RegyboxLoginError";
+  loginError.reason = "session_not_kept";
+  const model = await buildStatusModel({
+    env: workerEnv({ CALENDAR_URL: "" }),
+    kv: makeKv(),
+    now: () => NOW_MS,
+    createClient: () => ({
+      fetchClassesHtml: async () => {
+        throw loginError;
+      },
+    }),
+  });
+  const failed = flatChecks(model).find((item) => item.text === "Regybox sign-in failed");
+  assert.equal(failed?.level, "bad");
+});
+
+test("a class list in an unexpected layout is a warning, not a login failure", async () => {
+  const model = await buildStatusModel({
+    env: workerEnv({ CALENDAR_URL: "" }),
+    kv: makeKv(),
+    now: () => NOW_MS,
+    createClient: () => ({
+      fetchClassesHtml: async () => '<div class="filtro0"><span>no name or time</span></div>',
+    }),
+  });
+  const warning = flatChecks(model).find((item) => item.text.startsWith("Signed in to Regybox, but"));
+  assert.equal(warning?.level, "warn");
 });
 
 test("a reachable calendar without matching events warns about event names", async () => {
@@ -191,7 +223,7 @@ test("the last run section summarizes results and failures", async () => {
     ],
   };
   const model = await buildStatusModel({
-    env: workerEnv({ CALENDAR_URL: "", PHPSESSID: "", REGYBOX_USER: "" }),
+    env: workerEnv({ CALENDAR_URL: "", REGIBOX_EMAIL: "", REGIBOX_PASSWORD: "" }),
     kv: makeKv({ "regybox:v1:last_run": JSON.stringify(lastRun) }),
     now: () => NOW_MS,
   });
@@ -281,7 +313,7 @@ test("recent activity is newest-first with outcome levels and is omitted when em
 
 test("the rendered page is safe, read-only HTML without secrets", async () => {
   const model = await buildStatusModel({
-    env: workerEnv({ PHPSESSID: "super-secret-cookie<script>" }),
+    env: workerEnv({ REGIBOX_PASSWORD: "super-secret-cookie<script>" }),
     kv: makeKv(),
     now: () => NOW_MS,
     createClient: okClient,

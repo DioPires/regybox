@@ -20,8 +20,8 @@ const emailEnv = {
 };
 
 const workerEnv = {
-  PHPSESSID: "session",
-  REGYBOX_USER: "user",
+  REGIBOX_EMAIL: "member@example.test",
+  REGIBOX_PASSWORD: "test-password",
   ...emailEnv,
 };
 

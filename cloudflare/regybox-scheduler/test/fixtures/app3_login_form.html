@@ -1,0 +1,76 @@
+<div class="page">
+			<div class="navbar">
+		  <div class="navbar-inner sliding">
+			<div class="left">
+			  <a class="link back">
+				<i class="icon icon-back"></i>
+				<span class="if-not-md">Back</span>
+			  </a>
+			</div>
+		  </div>
+		</div>
+		    <div class="page-content login-screen-content">
+		<div style="display: flex; align-items: center; justify-content: center;">
+		  <img id="feed_flag" src="/php8/app3/img/imgs/pt.png" width="20" height="20" class="circle" alt="flag" onclick="$('.langs_all').slideToggle(100); $('.wellcome_text').fadeTo(100, 0.01);" style="cursor:pointer" /> &nbsp;
+			<div class="langs_all" style="position:absolute; padding-left:5px; padding-top:5px; display:none;background-color:var(--f7-popover-bg-color);color:var(--f7-text-color);border-radius:var(--f7-popover-border-radius);">
+			<a onClick="muda_lang('en')" class="link"><img class="circle" src="/php8/app3/img/imgs/en.png" width="20px;" /></a> &nbsp;&nbsp;&nbsp;<a onClick="muda_lang('pt')" class="link"><img class="circle" src="/php8/app3/img/imgs/pt.png" width="20px;" /></a> &nbsp;&nbsp;&nbsp;<a onClick="muda_lang('es')" class="link"><img class="circle" src="/php8/app3/img/imgs/es.png" width="20px;" /></a> &nbsp;&nbsp;&nbsp;<a onClick="muda_lang('it')" class="link"><img class="circle" src="/php8/app3/img/imgs/it.png" width="20px;" /></a> &nbsp;&nbsp;&nbsp;<a onClick="muda_lang('fr')" class="link"><img class="circle" src="/php8/app3/img/imgs/fr.png" width="20px;" /></a> &nbsp;&nbsp;&nbsp;<a onClick="muda_lang('de')" class="link"><img class="circle" src="/php8/app3/img/imgs/de.png" width="20px;" /></a> &nbsp;&nbsp;&nbsp;<a onClick="muda_lang('br')" class="link"><img class="circle" src="/php8/app3/img/imgs/br.png" width="20px;" /></a> &nbsp;&nbsp;&nbsp;			</div>
+		  <span class="texto16 wellcome_text"><span id="lan_1">Bem-vindo ao</span> RegyBox</span>
+		</div>
+      <div class="login-screen-title" style="padding-top:0px;"><div class="circle"><img src="/escolas/0/logotipo.jpg" width="150" height="150" style="border-radius:50%;" /></div></div>
+	  <form class="ajax-submit" action="scripts/verifica_acesso.php?pwa=999999&id_box=180&pwa=999999&v=" method="post" data-callback="verifica_acesso_fun">
+        <input name="csrf_token" id="csrf_token" type="hidden" value="csrf-test-token">
+		<input name="id_box" type="hidden" value="180" />
+		<input name="login" type="hidden" value="" />
+		<input name="pwa" type="hidden" value="999999" />
+		<input id="lingua_set2" name="lingua" type="hidden" value="pt" />
+		<input name="acs" id="acs" type="hidden" value="acs-test-token" />
+		<input name="v" id="v" type="hidden" value="" />
+		<div class="list" style="padding-left:20px; padding-right:20px;">
+		  <ul>
+			<li class="item-content item-input item-input-outline" style="--f7-input-outline-border-radius:999px;">
+			  <div class="item-media">
+				<!-- Lucide mail icon -->
+				<i data-lucide="mail" class="icon"></i>
+			  </div>
+			  <div class="item-inner">
+				<div class="item-title item-floating-label" id="lan_9">E-mail</div>
+				<div class="item-input-wrap">
+				  <input type="text" inputmode="email" autocapitalize="none" autocorrect="off" spellcheck="false" id="lan_10" placeholder="O teu e-mail" id="email" name="login5f3a91c" autocomplete="new-password" readonly onfocus="this.removeAttribute('readonly');" value="" />
+				  <span class="input-clear-button"></span>
+				</div>
+			  </div>
+			</li>
+			<li class="item-content item-input item-input-outline" style="--f7-input-outline-border-radius:999px;">
+			  <div class="item-media">
+				<!-- Lucide lock icon -->
+				<i data-lucide="lock" class="icon"></i>
+			  </div>
+			  <div class="item-inner">
+				<div class="item-title item-floating-label" id="lan_11">Palavra-passe</div>
+				<div class="item-input-wrap">
+				  <input type="password" id="lan_12" placeholder="Escreve a palavra-passe" name="password5f3a91c" value=""   />
+				  <span class="password-toggle">
+					<i data-lucide="eye" class="icon toggle-icon"></i>
+				  </span>
+				</div>
+			  </div>
+			</li>
+		  </ul>
+		</div>
+	
+        <div class="list">
+			<div style="padding-left:40px; padding-right:40px;" align="right">
+				<input type="submit" name="but_dados" id="but_dados" value="LOGIN" class="button button-large button-round button-fill" style="color:black"/>
+									<button class="button button-small button-round button-outline" type="button" onclick="app.views.main.router.back();" style="display:inline-flex;width:auto;white-space:nowrap; text-transform:uppercase; margin-top:20px;" id="lan_13">Outro Box</button>
+									<button class="button button-small button-round button-outline" type="button" onclick="recupera_pass('login5f3a91c','180');" style="display:inline-flex;width:auto;white-space:nowrap; text-transform:uppercase; margin-top:20px;" id="lan_15">Recuperar</button>
+								<div id="feed_login_recover" style="display:none; padding-top:16px;">
+					<span class="texto14" style="opacity:0.7;">Esqueceu-se da palavra-passe?</span>
+					&nbsp;<a class="link" onclick="recupera_pass('login5f3a91c','180');" style="text-transform:uppercase; display:inline; white-space:nowrap;">Recuperar</a>
+				</div>
+			</div>
+        </div>
+      </form>
+	  <input type="hidden" id="mode" value="dark">
+	  <input type="hidden" id="tema" value="#c0c0c0">
+    </div>
+ </div>
